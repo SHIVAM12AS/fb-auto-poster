@@ -274,27 +274,23 @@ app.post('/api/schedule', async (req, res) => {
     }
 
     const jobId = uuidv4();
-    const cronExpression = minutesToCron(mins);
+    const intervalMs = mins * 60 * 1000;
 
-    if (!cron.validate(cronExpression)) {
-      return res.status(400).json({ error: `Invalid interval. Generated cron: ${cronExpression}` });
-    }
-
-    const task = cron.schedule(cronExpression, () => {
+    // Use setInterval for EXACT interval timing relative to start time
+    const timer = setInterval(() => {
       runCycle(jobId, topic, page.pageId, page.accessToken, page.name);
-    });
+    }, intervalMs);
 
     activeJobs.set(jobId, {
-      task,
+      timer,
       topic,
       intervalMinutes: mins,
-      cronExpression,
       pageName: page.name,
       pageId: page.pageId,
       createdAt: new Date().toISOString(),
     });
 
-    console.log(`[${new Date().toISOString()}] 📅 Scheduled job "${jobId}" for topic "${topic}" on page "${page.name}" every ${mins} min`);
+    console.log(`[${new Date().toISOString()}] 📅 Scheduled job "${jobId}" for topic "${topic}" on page "${page.name}" every ${mins} min (Exact interval)`);
 
     // Trigger the first post immediately
     runCycle(jobId, topic, page.pageId, page.accessToken, page.name);
@@ -304,8 +300,7 @@ app.post('/api/schedule', async (req, res) => {
       topic,
       intervalMinutes: mins,
       pageName: page.name,
-      cronExpression,
-      message: `Automation started on "${page.name}"! First post triggered, then every ${mins} minute(s).`,
+      message: `Automation started on "${page.name}"! First post triggered, then every exactly ${mins} minute(s).`,
     });
   } catch (err) {
     console.error('Schedule error:', err);
@@ -321,7 +316,6 @@ app.get('/api/schedules', (req, res) => {
       id,
       topic: job.topic,
       intervalMinutes: job.intervalMinutes,
-      cronExpression: job.cronExpression,
       pageName: job.pageName,
       createdAt: job.createdAt,
     });
@@ -338,7 +332,8 @@ app.delete('/api/schedule/:id', (req, res) => {
     return res.status(404).json({ error: 'Automation not found.' });
   }
 
-  job.task.stop();
+  if (job.timer) clearInterval(job.timer);
+  if (job.task) job.task.stop(); // Backup safety in case some older job still uses task
   activeJobs.delete(id);
   console.log(`[${new Date().toISOString()}] 🛑 Stopped job "${id}"`);
 
