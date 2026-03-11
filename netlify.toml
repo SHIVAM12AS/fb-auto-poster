@@ -3,9 +3,14 @@
   command = "npm run build"
   publish = "dist"
 
-[build.environment]
-  VITE_API_URL = "https://fb-auto-poster-api.onrender.com"
+# API proxy — routes /api/* to Render backend
+[[redirects]]
+  from = "/api/*"
+  to = "https://fb-auto-poster-api.onrender.com/api/:splat"
+  status = 200
+  force = true
 
+# SPA fallback — all other routes go to index.html
 [[redirects]]
   from = "/*"
   to = "/index.html"
