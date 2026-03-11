@@ -1,7 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import './App.css';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
+// Helper: fetch with safe JSON parsing (handles HTML error pages gracefully)
+async function safeFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(res.ok ? 'Server returned non-JSON response' : `Server error (${res.status})`);
+  }
+  const data = await res.json();
+  return { res, data };
+}
 
 function App() {
   const [topic, setTopic] = useState('');
@@ -23,22 +34,21 @@ function App() {
 
   const fetchSchedules = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/schedules`);
-      setSchedules(await res.json());
+      const { data } = await safeFetch(`${API_BASE}/api/schedules`);
+      setSchedules(data);
     } catch { /* silent */ }
   }, []);
 
   const fetchLogs = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/logs`);
-      setLogs(await res.json());
+      const { data } = await safeFetch(`${API_BASE}/api/logs`);
+      setLogs(data);
     } catch { /* silent */ }
   }, []);
 
   const fetchPages = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/pages`);
-      const data = await res.json();
+      const { data } = await safeFetch(`${API_BASE}/api/pages`);
       setPages(data);
       if (data.length > 0 && !selectedPageId) {
         setSelectedPageId(data[0].id);
@@ -48,8 +58,8 @@ function App() {
 
   const fetchHealth = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/health`);
-      setHealth(await res.json());
+      const { data } = await safeFetch(`${API_BASE}/api/health`);
+      setHealth(data);
     } catch { setHealth(null); }
   }, []);
 
@@ -83,7 +93,7 @@ function App() {
     setLoading(true);
     setStatusMsg('');
     try {
-      const res = await fetch(`${API_BASE}/api/schedule`, {
+      const { res, data } = await safeFetch(`${API_BASE}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -92,7 +102,6 @@ function App() {
           savedPageId: selectedPageId,
         }),
       });
-      const data = await res.json();
       if (res.ok) {
         setStatusMsg(`✅ ${data.message}`);
         setTopic('');
@@ -109,8 +118,7 @@ function App() {
 
   const handleStop = async (id) => {
     try {
-      const res = await fetch(`${API_BASE}/api/schedule/${id}`, { method: 'DELETE' });
-      const data = await res.json();
+      const { res, data } = await safeFetch(`${API_BASE}/api/schedule/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setStatusMsg(`🛑 ${data.message}`);
         fetchSchedules();
@@ -130,7 +138,7 @@ function App() {
     setPageLoading(true);
     setStatusMsg('');
     try {
-      const res = await fetch(`${API_BASE}/api/pages`, {
+      const { res, data } = await safeFetch(`${API_BASE}/api/pages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,7 +147,6 @@ function App() {
           accessToken: newPageToken.trim(),
         }),
       });
-      const data = await res.json();
       if (res.ok) {
         setStatusMsg(`✅ ${data.message}`);
         setNewPageName('');
@@ -158,8 +165,7 @@ function App() {
 
   const handleRemovePage = async (id) => {
     try {
-      const res = await fetch(`${API_BASE}/api/pages/${id}`, { method: 'DELETE' });
-      const data = await res.json();
+      const { res, data } = await safeFetch(`${API_BASE}/api/pages/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setStatusMsg(`🗑️ ${data.message}`);
         fetchPages();
@@ -175,8 +181,7 @@ function App() {
   const handleClearLogs = async () => {
     if (!window.confirm('Are you sure you want to clear all logs?')) return;
     try {
-      const res = await fetch(`${API_BASE}/api/logs`, { method: 'DELETE' });
-      const data = await res.json();
+      const { res, data } = await safeFetch(`${API_BASE}/api/logs`, { method: 'DELETE' });
       if (res.ok) {
         setStatusMsg(`🧹 ${data.message}`);
         setLogs([]);
