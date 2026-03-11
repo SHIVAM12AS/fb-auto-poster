@@ -172,6 +172,22 @@ function App() {
     }
   };
 
+  const handleClearLogs = async () => {
+    if (!window.confirm('Are you sure you want to clear all logs?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/logs`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        setStatusMsg(`🧹 ${data.message}`);
+        setLogs([]);
+      } else {
+        setStatusMsg(`❌ ${data.error}`);
+      }
+    } catch (err) {
+      setStatusMsg(`❌ ${err.message}`);
+    }
+  };
+
   const formatTime = (iso) => new Date(iso).toLocaleString();
 
   return (
@@ -373,6 +389,15 @@ function App() {
           <h2>
             <span className="card-icon">📋</span> Recent Logs
             <span className="badge">{logs.length}</span>
+            {logs.length > 0 && (
+              <button
+                className="btn btn-clear-logs"
+                onClick={handleClearLogs}
+                title="Clear all logs"
+              >
+                🗑️ Clear
+              </button>
+            )}
           </h2>
           {logs.length === 0 ? (
             <div className="empty-state">

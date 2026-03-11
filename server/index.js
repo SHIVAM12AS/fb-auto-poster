@@ -345,6 +345,13 @@ app.get('/api/logs', (req, res) => {
   res.json(postLogs);
 });
 
+// DELETE /api/logs — Clear all logs
+app.delete('/api/logs', (req, res) => {
+  postLogs.length = 0;
+  console.log(`[${new Date().toISOString()}] 🧹 Logs cleared by user`);
+  res.json({ message: 'Logs cleared successfully.' });
+});
+
 // GET /api/health — Health check
 app.get('/api/health', (req, res) => {
   res.json({

@@ -276,6 +276,24 @@ body {
   border-color: var(--accent-1);
 }
 
+.btn-clear-logs {
+  margin-left: auto;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-clear-logs:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: var(--error);
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.1);
+}
+
 .page-form {
   padding: 16px;
   background: rgba(15, 23, 42, 0.4);
