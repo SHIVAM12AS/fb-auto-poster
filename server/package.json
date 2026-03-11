@@ -1,0 +1,19 @@
+{
+  "name": "fb-auto-poster-server",
+  "version": "1.0.0",
+  "description": "Facebook AI Auto-Poster Agent - Backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "uuid": "^11.0.5"
+  }
+}

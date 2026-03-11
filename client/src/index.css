@@ -1,0 +1,13 @@
+/* ─── Global Reset ──────────────────────────────────── */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
