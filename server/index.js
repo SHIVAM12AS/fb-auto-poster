@@ -131,13 +131,21 @@ async function postToFacebook(message, pageId, accessToken) {
     throw new Error('Page ID or Access Token is missing');
   }
 
-  const url = `https://graph.facebook.com/v19.0/${pageId}/feed`;
-  const res = await axios.post(url, {
-    message,
-    access_token: accessToken,
-  });
-
-  return res.data;
+  const url = `https://graph.facebook.com/v21.0/${pageId}/feed`;
+  try {
+    const res = await axios.post(url, {
+      message,
+      access_token: accessToken,
+    });
+    return res.data;
+  } catch (err) {
+    // Extract detailed Facebook error message
+    if (err.response && err.response.data && err.response.data.error) {
+      const fbErr = err.response.data.error;
+      throw new Error(`Facebook API Error: ${fbErr.message} (Code: ${fbErr.code}, Type: ${fbErr.type})`);
+    }
+    throw err;
+  }
 }
 
 // ─── Helper: Add Log Entry ─────────────────────────────────────
