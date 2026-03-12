@@ -5,6 +5,7 @@ const cors = require('cors');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
+const mongoose = require('mongoose');
 
 const app = express();
 
@@ -31,26 +32,77 @@ app.use(express.json());
 const {
   FB_PAGE_ID,
   FB_ACCESS_TOKEN,
+  MONGODB_URI,
   PORT = 5000,
 } = process.env;
 
-// ─── In-Memory Stores ──────────────────────────────────────────
-const activeJobs = new Map();   // id -> { task, topic, intervalMinutes, pageId, pageName, createdAt }
-const postLogs = [];            // { id, topic, message, status, timestamp, error?, pageName? }
+// ─── MongoDB Connection ────────────────────────────────────────
+if (MONGODB_URI) {
+  mongoose.connect(MONGODB_URI, { dbName: 'fb-auto-poster' })
+    .then(() => console.log('✅ Connected to MongoDB'))
+    .catch(err => console.error('❌ MongoDB connection error:', err.message));
+} else {
+  console.warn('⚠️ MONGODB_URI not set — using in-memory storage (data will be lost on restart)');
+}
+
+// ─── Mongoose Schemas ──────────────────────────────────────────
+const pageSchema = new mongoose.Schema({
+  _id: { type: String, default: uuidv4 },
+  name: String,
+  pageId: String,
+  accessToken: String,
+  createdAt: { type: Date, default: Date.now },
+});
+const Page = mongoose.model('Page', pageSchema);
+
+const logSchema = new mongoose.Schema({
+  jobId: String,
+  topic: String,
+  pageName: String,
+  message: String,
+  status: String,
+  error: String,
+  fbPostId: String,
+  timestamp: { type: Date, default: Date.now },
+});
+logSchema.index({ timestamp: -1 });
+const Log = mongoose.model('Log', logSchema);
+
+// ─── In-Memory Stores (automations need timers, can't persist) ─
+const activeJobs = new Map();
 const MAX_LOGS = 50;
 
-// ─── Saved Pages Store ─────────────────────────────────────────
-const savedPages = new Map();   // id -> { id, name, pageId, accessToken }
+// ─── Helper: Get all saved pages (DB + .env default) ───────────
+async function getAllPages() {
+  const dbPages = MONGODB_URI ? await Page.find().lean() : [];
+  const pages = dbPages.map(p => ({
+    id: p._id,
+    name: p.name,
+    pageId: p.pageId,
+    accessToken: p.accessToken,
+  }));
+  // Add .env default if configured and not already in DB
+  if (FB_PAGE_ID && FB_ACCESS_TOKEN) {
+    const envExists = pages.some(p => p.pageId === FB_PAGE_ID);
+    if (!envExists) {
+      pages.unshift({
+        id: 'env-default',
+        name: 'Default Page (from .env)',
+        pageId: FB_PAGE_ID,
+        accessToken: FB_ACCESS_TOKEN,
+      });
+    }
+  }
+  return pages;
+}
 
-// Add default page from .env if configured
-if (FB_PAGE_ID && FB_ACCESS_TOKEN) {
-  const defaultId = uuidv4();
-  savedPages.set(defaultId, {
-    id: defaultId,
-    name: 'Default Page (from .env)',
-    pageId: FB_PAGE_ID,
-    accessToken: FB_ACCESS_TOKEN,
-  });
+async function findPageById(id) {
+  if (id === 'env-default' && FB_PAGE_ID && FB_ACCESS_TOKEN) {
+    return { id: 'env-default', name: 'Default Page (from .env)', pageId: FB_PAGE_ID, accessToken: FB_ACCESS_TOKEN };
+  }
+  if (!MONGODB_URI) return null;
+  const p = await Page.findById(id).lean();
+  return p ? { id: p._id, name: p.name, pageId: p.pageId, accessToken: p.accessToken } : null;
 }
 
 // ─── AI Content Generation (Pico LLM API) ─────────────────────
@@ -149,9 +201,16 @@ async function postToFacebook(message, pageId, accessToken) {
 }
 
 // ─── Helper: Add Log Entry ─────────────────────────────────────
-function addLog(entry) {
-  postLogs.unshift(entry);
-  if (postLogs.length > MAX_LOGS) postLogs.pop();
+async function addLog(entry) {
+  if (MONGODB_URI) {
+    await Log.create(entry);
+    // Keep only last MAX_LOGS
+    const count = await Log.countDocuments();
+    if (count > MAX_LOGS) {
+      const oldest = await Log.find().sort({ timestamp: 1 }).limit(count - MAX_LOGS);
+      await Log.deleteMany({ _id: { $in: oldest.map(l => l._id) } });
+    }
+  }
 }
 
 // ─── Helper: Run one cycle (generate + post) ──────────────────
@@ -205,47 +264,63 @@ function minutesToCron(minutes) {
 // ─── API Routes: Pages ─────────────────────────────────────────
 
 // GET /api/pages — List all saved pages
-app.get('/api/pages', (req, res) => {
-  const pages = [];
-  for (const [id, page] of savedPages) {
-    pages.push({
-      id,
-      name: page.name,
-      pageId: page.pageId,
-      // Don't expose full access token
-      tokenPreview: page.accessToken ? `...${page.accessToken.slice(-8)}` : '',
-    });
+app.get('/api/pages', async (req, res) => {
+  try {
+    const pages = await getAllPages();
+    res.json(pages.map(p => ({
+      id: p.id,
+      name: p.name,
+      pageId: p.pageId,
+      tokenPreview: p.accessToken ? `...${p.accessToken.slice(-8)}` : '',
+    })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(pages);
 });
 
 // POST /api/pages — Add a new Facebook Page
-app.post('/api/pages', (req, res) => {
+app.post('/api/pages', async (req, res) => {
   const { name, pageId, accessToken } = req.body;
 
   if (!name || !pageId || !accessToken) {
     return res.status(400).json({ error: 'name, pageId, and accessToken are all required.' });
   }
 
-  const id = uuidv4();
-  savedPages.set(id, { id, name, pageId, accessToken });
-
-  console.log(`[${new Date().toISOString()}] 📄 Added page "${name}" (${pageId})`);
-  res.json({ id, name, pageId, message: `Page "${name}" added successfully.` });
+  try {
+    if (MONGODB_URI) {
+      const page = await Page.create({ name, pageId, accessToken });
+      console.log(`[${new Date().toISOString()}] 📄 Added page "${name}" (${pageId})`);
+      res.json({ id: page._id, name, pageId, message: `Page "${name}" added successfully.` });
+    } else {
+      const id = uuidv4();
+      console.log(`[${new Date().toISOString()}] 📄 Added page "${name}" (${pageId}) [in-memory]`);
+      res.json({ id, name, pageId, message: `Page "${name}" added (in-memory only).` });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // DELETE /api/pages/:id — Remove a saved page
-app.delete('/api/pages/:id', (req, res) => {
+app.delete('/api/pages/:id', async (req, res) => {
   const { id } = req.params;
-  const page = savedPages.get(id);
 
-  if (!page) {
-    return res.status(404).json({ error: 'Page not found.' });
+  if (id === 'env-default') {
+    return res.status(400).json({ error: 'Cannot delete the default .env page.' });
   }
 
-  savedPages.delete(id);
-  console.log(`[${new Date().toISOString()}] 🗑️ Removed page "${page.name}"`);
-  res.json({ message: `Page "${page.name}" removed.`, id });
+  try {
+    if (MONGODB_URI) {
+      const page = await Page.findByIdAndDelete(id);
+      if (!page) return res.status(404).json({ error: 'Page not found.' });
+      console.log(`[${new Date().toISOString()}] 🗑️ Removed page "${page.name}"`);
+      res.json({ message: `Page "${page.name}" removed.`, id });
+    } else {
+      res.status(404).json({ error: 'Page not found.' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── API Routes: Scheduling ────────────────────────────────────
@@ -263,7 +338,7 @@ app.post('/api/schedule', async (req, res) => {
       return res.status(400).json({ error: 'Please select a Facebook Page.' });
     }
 
-    const page = savedPages.get(savedPageId);
+    const page = await findPageById(savedPageId);
     if (!page) {
       return res.status(400).json({ error: 'Selected page not found. Please add a page first.' });
     }
@@ -341,31 +416,50 @@ app.delete('/api/schedule/:id', (req, res) => {
 });
 
 // GET /api/logs — Get recent post logs
-app.get('/api/logs', (req, res) => {
-  res.json(postLogs);
+app.get('/api/logs', async (req, res) => {
+  try {
+    if (MONGODB_URI) {
+      const logs = await Log.find().sort({ timestamp: -1 }).limit(MAX_LOGS).lean();
+      res.json(logs.map(l => ({ id: l._id, ...l })));
+    } else {
+      res.json([]);
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // DELETE /api/logs — Clear all logs
-app.delete('/api/logs', (req, res) => {
-  postLogs.length = 0;
-  console.log(`[${new Date().toISOString()}] 🧹 Logs cleared by user`);
-  res.json({ message: 'Logs cleared successfully.' });
+app.delete('/api/logs', async (req, res) => {
+  try {
+    if (MONGODB_URI) {
+      await Log.deleteMany({});
+    }
+    console.log(`[${new Date().toISOString()}] 🧹 Logs cleared by user`);
+    res.json({ message: 'Logs cleared successfully.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/health — Health check
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  const pages = await getAllPages().catch(() => []);
   res.json({
     status: 'ok',
     activeJobs: activeJobs.size,
-    savedPages: savedPages.size,
-    facebookConfigured: savedPages.size > 0,
+    savedPages: pages.length,
+    facebookConfigured: pages.length > 0,
+    database: MONGODB_URI ? (mongoose.connection.readyState === 1 ? 'connected' : 'disconnected') : 'not configured',
   });
 });
 
-// ─── Start Server ──────────────────────────────────────────────
-app.listen(PORT, () => {
+// ─── Start Server ──────────────────────────────────────────────────
+app.listen(PORT, async () => {
+  const pages = await getAllPages().catch(() => []);
   console.log(`\n🚀 Facebook AI Auto-Poster Server running on http://localhost:${PORT}`);
-  console.log(`   Saved Pages: ${savedPages.size}`);
-  console.log(`   Facebook:    ${savedPages.size > 0 ? '✅ Configured' : '❌ No pages added'}`);
+  console.log(`   Database:    ${MONGODB_URI ? '✅ MongoDB Connected' : '⚠️ In-Memory Only'}`);
+  console.log(`   Saved Pages: ${pages.length}`);
+  console.log(`   Facebook:    ${pages.length > 0 ? '✅ Configured' : '❌ No pages added'}`);
   console.log('');
 });
