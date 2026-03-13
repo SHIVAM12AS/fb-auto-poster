@@ -68,7 +68,19 @@ const logSchema = new mongoose.Schema({
 logSchema.index({ timestamp: -1 });
 const Log = mongoose.model('Log', logSchema);
 
-// ─── In-Memory Stores (automations need timers, can't persist) ─
+const automationSchema = new mongoose.Schema({
+  _id: { type: String, default: uuidv4 },
+  topic: String,
+  intervalMinutes: Number,
+  savedPageId: String,
+  pageName: String,
+  pageId: String,
+  accessToken: String,
+  createdAt: { type: Date, default: Date.now },
+});
+const Automation = mongoose.model('Automation', automationSchema);
+
+// ─── In-Memory Stores (timers can't persist, only config does) ─
 const activeJobs = new Map();
 const MAX_LOGS = 50;
 
@@ -103,6 +115,51 @@ async function findPageById(id) {
   if (!MONGODB_URI) return null;
   const p = await Page.findById(id).lean();
   return p ? { id: p._id, name: p.name, pageId: p.pageId, accessToken: p.accessToken } : null;
+}
+
+// ─── Helper: Start a job (reusable for new + restart) ──────────
+function startJob(jobId, topic, mins, pageId, accessToken, pageName, triggerFirst = true) {
+  const intervalMs = mins * 60 * 1000;
+
+  const timer = setInterval(() => {
+    runCycle(jobId, topic, pageId, accessToken, pageName);
+  }, intervalMs);
+
+  activeJobs.set(jobId, {
+    timer,
+    topic,
+    intervalMinutes: mins,
+    pageName,
+    pageId,
+    createdAt: new Date().toISOString(),
+  });
+
+  console.log(`[${new Date().toISOString()}] 📅 Job "${jobId}" started: "${topic}" on "${pageName}" every ${mins} min`);
+
+  if (triggerFirst) {
+    runCycle(jobId, topic, pageId, accessToken, pageName);
+  }
+
+  return jobId;
+}
+
+// ─── Auto-restart saved automations on server boot ─────────────
+async function restartSavedAutomations() {
+  if (!MONGODB_URI) return;
+  try {
+    const saved = await Automation.find().lean();
+    if (saved.length === 0) {
+      console.log('   No saved automations to restart.');
+      return;
+    }
+    console.log(`   🔄 Restarting ${saved.length} saved automation(s)...`);
+    for (const auto of saved) {
+      startJob(auto._id, auto.topic, auto.intervalMinutes, auto.pageId, auto.accessToken, auto.pageName, false);
+    }
+    console.log(`   ✅ ${saved.length} automation(s) restarted successfully!`);
+  } catch (err) {
+    console.error('   ❌ Error restarting automations:', err.message);
+  }
 }
 
 // ─── AI Content Generation (Pico LLM API) ─────────────────────
@@ -243,24 +300,6 @@ async function runCycle(jobId, topic, pageId, accessToken, pageName) {
   return logEntry;
 }
 
-// ─── Helper: Convert minutes to cron expression ────────────────
-function minutesToCron(minutes) {
-  if (minutes < 1) minutes = 1;
-
-  if (minutes < 60) {
-    return `*/${minutes} * * * *`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-
-  if (remainingMinutes === 0) {
-    return `0 */${hours} * * *`;
-  }
-
-  return `*/${minutes} * * * *`;
-}
-
 // ─── API Routes: Pages ─────────────────────────────────────────
 
 // GET /api/pages — List all saved pages
@@ -349,26 +388,22 @@ app.post('/api/schedule', async (req, res) => {
     }
 
     const jobId = uuidv4();
-    const intervalMs = mins * 60 * 1000;
 
-    // Use setInterval for EXACT interval timing relative to start time
-    const timer = setInterval(() => {
-      runCycle(jobId, topic, page.pageId, page.accessToken, page.name);
-    }, intervalMs);
+    // Save automation config to MongoDB for restart persistence
+    if (MONGODB_URI) {
+      await Automation.create({
+        _id: jobId,
+        topic,
+        intervalMinutes: mins,
+        savedPageId,
+        pageName: page.name,
+        pageId: page.pageId,
+        accessToken: page.accessToken,
+      });
+    }
 
-    activeJobs.set(jobId, {
-      timer,
-      topic,
-      intervalMinutes: mins,
-      pageName: page.name,
-      pageId: page.pageId,
-      createdAt: new Date().toISOString(),
-    });
-
-    console.log(`[${new Date().toISOString()}] 📅 Scheduled job "${jobId}" for topic "${topic}" on page "${page.name}" every ${mins} min (Exact interval)`);
-
-    // Trigger the first post immediately
-    runCycle(jobId, topic, page.pageId, page.accessToken, page.name);
+    // Start the timer + trigger first post immediately
+    startJob(jobId, topic, mins, page.pageId, page.accessToken, page.name, true);
 
     res.json({
       id: jobId,
@@ -399,7 +434,7 @@ app.get('/api/schedules', (req, res) => {
 });
 
 // DELETE /api/schedule/:id — Stop and remove an automation
-app.delete('/api/schedule/:id', (req, res) => {
+app.delete('/api/schedule/:id', async (req, res) => {
   const { id } = req.params;
   const job = activeJobs.get(id);
 
@@ -408,10 +443,14 @@ app.delete('/api/schedule/:id', (req, res) => {
   }
 
   if (job.timer) clearInterval(job.timer);
-  if (job.task) job.task.stop(); // Backup safety in case some older job still uses task
   activeJobs.delete(id);
-  console.log(`[${new Date().toISOString()}] 🛑 Stopped job "${id}"`);
 
+  // Remove from MongoDB so it doesn't restart
+  if (MONGODB_URI) {
+    await Automation.findByIdAndDelete(id).catch(() => {});
+  }
+
+  console.log(`[${new Date().toISOString()}] 🛑 Stopped job "${id}"`);
   res.json({ message: 'Automation stopped successfully.', id });
 });
 
@@ -454,12 +493,14 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// ─── Start Server ──────────────────────────────────────────────────
+// ─── Start Server ──────────────────────────────────────────────
 app.listen(PORT, async () => {
   const pages = await getAllPages().catch(() => []);
   console.log(`\n🚀 Facebook AI Auto-Poster Server running on http://localhost:${PORT}`);
   console.log(`   Database:    ${MONGODB_URI ? '✅ MongoDB Connected' : '⚠️ In-Memory Only'}`);
   console.log(`   Saved Pages: ${pages.length}`);
   console.log(`   Facebook:    ${pages.length > 0 ? '✅ Configured' : '❌ No pages added'}`);
-  console.log('');
+
+  // Auto-restart saved automations after a short delay to ensure DB is ready
+  setTimeout(() => restartSavedAutomations(), 3000);
 });
